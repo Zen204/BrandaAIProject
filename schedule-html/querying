@@ -1,0 +1,158 @@
+from bs4 import BeautifulSoup
+import pandas as pd
+import re
+
+# Set Pandas display options
+pd.set_option('display.max_columns', None)  # Show all columns
+pd.set_option('display.max_colwidth', None)  # Show full content of each column
+pd.set_option('display.width', None)  # Auto-detect the display width
+
+# Load the saved HTML file
+with open('page.html', 'r', encoding='utf-8') as file:
+    html_content = file.read()
+
+# Parse the HTML content with BeautifulSoup
+soup = BeautifulSoup(html_content, 'html.parser')
+
+# Find the table containing the course data
+table = soup.find('table', id='classes-list')
+if table:
+    # Find all rows in the table
+    rows = table.find_all('tr')
+    courses = []
+
+    # Iterate through the rows to extract course data
+    for row in rows:
+        # Skip the header rows (they contain th elements)
+        if row.find('th'):
+            continue
+
+        # Extract course data from the cells (td elements)
+        cells = row.find_all('td')
+        if len(cells) >= 3:  # Ensure there are enough cells for course data
+            # Clean up the text by removing extra newlines and spaces
+            course_number = re.sub(r'\s+', ' ', cells[0].text.strip()).replace('\n', ' ')
+            course_title = re.sub(r'\s+', ' ', cells[1].text.strip()).replace('\n', ' ')
+            time_location = re.sub(r'\s+', ' ', cells[2].text.strip()).replace('\n', ' ')
+
+            # Store course details in a dictionary
+            courses.append({
+                'course_number': course_number,
+                'course_title': course_title,
+                'time_location': time_location
+            })
+
+    # Convert to Pandas DataFrame
+    df = pd.DataFrame(courses)
+    df.drop_duplicates()
+
+    # Preprocess the data: Extract days, time, and location
+    df[['days', 'time', 'location']] = df['time_location'].str.extract(r'([A-Za-z,]+) (.+? [AP]M–.+? [AP]M)(?:\s+(.+))?')
+    df['location'] = df['location'].fillna('TBD')  # Fill missing locations with 'TBD'
+
+    # Save the DataFrame to a CSV file (optional)
+    df.to_csv('courses.csv', index=False)
+    print("Course data saved to 'courses.csv'.")
+
+else:
+    print("Table with id 'classes-list' not found on the page.")
+    exit()
+
+# Query Rewrite Pipeline
+def tokenize(query):
+    """Split the query into tokens."""
+    return query.lower().split()
+
+def normalize(tokens):
+    """Normalize tokens (e.g., expand abbreviations)."""
+    abbreviation_map = {
+        "t": "T",  # Use abbreviated form to match the DataFrame
+        "th": "Th",
+        "f": "F",
+        "m": "M",
+        "w": "W",
+        "aaas": "AAAS",
+        "am": "AM",
+        "pm": "PM"
+    }
+    stop_words = {"what", "is", "the", "on", "at", "and"}  # Remove stop words
+    normalized_tokens = [abbreviation_map.get(token, token) for token in tokens if token not in stop_words]
+    return normalized_tokens
+
+def transform(tokens):
+    """Expand synonyms and correct spelling."""
+    synonym_map = {
+        "classes": ["courses", "sections"],
+        "time": ["schedule", "timing"]
+    }
+    transformed_tokens = []
+    for token in tokens:
+        transformed_tokens.extend(synonym_map.get(token, [token]))
+    return transformed_tokens
+
+def contextualize(tokens):
+    """Extract context (department, days, time) from tokens."""
+    context = {
+        "department": None,
+        "days": [],
+        "time": None
+    }
+    for token in tokens:
+        if token in ["M", "T", "W", "Th", "F"]:
+            context["days"].append(token)
+        elif ":" in token or token.endswith("AM") or token.endswith("PM"):
+            context["time"] = token
+        elif token in ["AAAS"]:
+            context["department"] = "AAAS"
+    return context
+
+def rewrite_query(context):
+    """Generate the rewritten query."""
+    query_parts = []
+    if context["department"]:
+        query_parts.append(f"{context['department']} classes")
+    if context["days"]:
+        query_parts.append(f"on {' and '.join(context['days'])}")
+    if context["time"]:
+        query_parts.append(f"at {context['time']}")
+    return " ".join(query_parts)
+
+def query_rewrite(query):
+    """Full query rewrite pipeline."""
+    prompt = f"Rewrite the following query to make it more structured and clear: '{query}'"
+    response = openai.Completion.create(
+        engine="text-davinci-003",  # Use GPT-3.5
+        prompt=prompt,
+        max_tokens=50,
+        n=1,
+        stop=None,
+        temperature =0.7)
+    rewritten_query = response.choices[0].text.strip()
+
+    return rewritten_query
+
+
+# Query the Course Data
+def find_classes(query):
+    """Find classes based on the rewritten query."""
+    rewritten_query, context = query_rewrite(query)
+    print("Rewritten Query:", rewritten_query)
+
+    # Filter the DataFrame based on the context
+    filtered_df = df
+    if context["department"]:
+        filtered_df = filtered_df[filtered_df["course_number"].str.contains(context["department"], case=False)]
+    if context["days"]:
+        # Ensure all specified days are present in the 'days' column
+        for day in context["days"]:
+            filtered_df = filtered_df[filtered_df["days"].str.contains(day, case=False)]
+    if context["time"]:
+        filtered_df = filtered_df[filtered_df["time"].str.contains(context["time"], case=False)]
+
+    return filtered_df
+
+# Example Usage
+query = "What AAAS classes are on T and F at 9:35 AM?"
+result = find_classes(query)
+print("\nQuery Results:")
+print(result)
